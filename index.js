@@ -7,8 +7,8 @@ EventEmitter = require('events').EventEmitter
 TQueue = require('./lib/tqueue.js')
 speedometer = require('speedometer')
 PacketBuffer = require('./lib/PacketBuffer.js')
-
-var speed = speedometer(1)
+speed = speedometer(1)
+Q = require('q')
 
 const ST_DATA = 0  //Data
 const ST_FIN = 1
@@ -19,10 +19,13 @@ const ST_SYN  = 4
 const VERSION = 1
 
 const INITIAL_TIMEOUT = 5000
+const PACKET_SIZE = 1500
 const CCONTROL_TARGET = 100000
-const MAX_CWND_INCREASE_PACKETS_PER_RTT = 8
+const MAX_CWND_INCREASE_PACKETS_PER_RTT = 8 * PACKET_SIZE
 const DEFAULT_WINDOW_SIZE = 10 * 1500
 const KEEP_ALIVE_INTERVAL = 60000
+
+
 
 function createServer() {
 	return new Server()
@@ -37,7 +40,7 @@ function Server() {
 
 util.inherits(Server, EventEmitter)
 
-Server.prototype.listen = function(port, connectListener) { //call once
+Server.prototype.listen = function(port, connectListener) { 
 	this.udpSock = dgram.createSocket('udp4');
 	this.udpSock.bind(port);
 	
@@ -60,7 +63,7 @@ Server.prototype.listen = function(port, connectListener) { //call once
 		this.conSockets[id] = new Socket(this.udpSock, rinfo.port, rinfo.address)
 		this.cheat = this.conSockets[id]
 		this.conSockets[id].on('closed', ()=> delete this.conSockets[id])	
-		this.conSockets[id].on('data', (data) => {var bs = speed(data.length); this.total += data.length; console.log("BYTES PER SECOND:",bs )})
+		this.conSockets[id].on('data', (data) => {var bs = speed(data.length); this.conSockets[id].total += data.length; console.log("TOTAL:", this.conSockets[id].total);console.log("BYTES PER SECOND:",bs )})
 		this.emit('connection',this.conSockets[id])
 		this.conSockets[id]._recv(msg)	
 	})
@@ -86,29 +89,31 @@ function Socket(udpSock, port, host) {
 	this.sendBufferInit = null
 	this.recvBuffer = []
 	this.recvBuffer2 = new PacketBuffer()
+	this.sendBuffer2 = new PacketBuffer()
 	this.timer;
 	
 	this.udpSock = udpSock;
 
 	this.connected = false;
 	this.connecting = false;
+	this.disconnecting = true;
 	
 	this.dupAck = 0;
 	
-	this.packet_size = 1500
+	this.packet_size = PACKET_SIZE
 	this.numPacks = 0; //number of packets sent
 	this.cur_window = 0; //bytes sent, not acked
 	
-	this.max_window = DEFAULT_WINDOW_SIZE ; //max send window 
-	this.wnd_size = DEFAULT_WINDOW_SIZE * 10; //max recieve window
-	this.ownWnd_size = DEFAULT_WINDOW_SIZE * 10;
+	this.max_window = DEFAULT_WINDOW_SIZE; //max send window 
+	this.wnd_size = DEFAULT_WINDOW_SIZE; //max recieve window
+	this.ownWnd_size = DEFAULT_WINDOW_SIZE;
 	
 	this.reply_micro = 250*1000;
 	
 	this.default_timeout =  INITIAL_TIMEOUT
 	this.timeOutMult = 1
-	this.rtt = 500;
-	this.rtt_var = 100;
+	this.rtt = 500000;
+	this.rtt_var = 100000;
 	
 	this.seq_nr;
 	this.ack_nr;
@@ -124,6 +129,8 @@ function Socket(udpSock, port, host) {
 	//this.win_reply_micro2.insert(this.timeStamp()/1e3, 1000)
 	this.acks = []
 	this.seqs = []
+	this.recvAcks = []
+	this.stuff = []
 }
 
 util.inherits(Socket, Duplex)
@@ -158,7 +165,11 @@ Socket.prototype.connect = function (port, host) {
 
 Socket.prototype._sendSyn = function() { //called by connect
 	this.seq_nr = crypto.randomBytes(2).readUInt16BE();
-	this.sendBufferInit = this.seq_nr
+	
+	this.sendBufferInit = this.seq_nr + 1
+	
+	//this.recvBuffer2.init(this.seq_nr + 1)
+	
 	this.recvConnectID = crypto.randomBytes(2).readUInt16BE();
 	this.sendConnectID = this.recvConnectID + 1;
 	let header = this.makeHeader(ST_SYN)
@@ -171,6 +182,7 @@ Socket.prototype._sendSyn = function() { //called by connect
 	*/
 	this._send(header);
 	this.seq_nr++;
+	this.sendBuffer2.init(this.seq_nr)
 } 
 
 Socket.prototype._recvSyn = function(header) {
@@ -179,43 +191,54 @@ Socket.prototype._recvSyn = function(header) {
 	this.ack_nr = header.seq_nr;
 	this.recvBuffer2.init(header.seq_nr + 1)
 	this.seq_nr = crypto.randomBytes(2).readUInt16BE()
-	this.sendBufferInit = this.seq_nr
+	this.sendBufferInit = this.seq_nr + 1
 	this.wnd_size = header.wnd_size;
 	this.connecting = true;
 	this._sendState() //synack
-	this.seq_nr ++;
+	this.seq_nr++;
+	this.sendBuffer2.init(this.seq_nr)
 	
 }
 
 Socket.prototype._sendFin = function() {
-	//this.emit('dump')
+	this.disconnecting = true;
 	this._send(this.makeHeader(ST_FIN))
 }
 
-Socket.prototype._resendData = function() { //resend packeet at beginning of window
-	this._sendData()
+Socket.prototype._resendData = function(seq_nr) { //resend packeet at beginning of window
+	if(!seq_nr)
+		return this._sendData()
+	
 }
 
 Socket.prototype._sendData = function() { //called by write, calls_send
-	
-	while(this.cur_window + this.packet_size < this.max_window && this.cur_window < this.wnd_size && this.sendBuffer.length > 0 ) {
-		let index = this.seq_nr - this.sendBufferInit
-		if(index > this.sendBuffer.length) break;
-		let next_data = this.sendBuffer[index]
-		//console.log("NextDATA", next_data)
+	//var i = 0
+	while(this.cur_window + this.packet_size < this.max_window && this.cur_window + this.packet_size < this.wnd_size ) {
+		//console.log("SENDING")
+		//console.log(this.sendBuffer2)
+		let next_data = this.sendBuffer2.get(this.seq_nr)
+		if(!next_data) {
+			//console.log("returning")
+			break
+		}
+		//let next_data = this.sendBuffer[index]
 		let header = this.makeHeader(ST_DATA)
+		
+		//this.sendBuffer2.put(this.seq_nr, )
 		this.timeOutQueue.insert(header.timestamp_microseconds, this.seq_nr)
-		this.seqs.push(this.seq_nr)
+		//this.seqs.push(this.seq_nr)
 		this.numPacks++;
 		this.seq_nr++;
+		
 		if(next_data != undefined)
 			this.cur_window += next_data.length
 		this._send(header, next_data)
 	}
+	if(this.sendBuffer2.isEmpty()) this.emit('empty')
 }
 
 Socket.prototype._sendState = function(ack_nr) { //called by _recvSyn, _keepAlice, calls _send
-	this.acks.push(this.ack_nr)
+	//this.acks.push(this.ack_nr)
 	this._send(this.makeHeader(ST_STATE, null, ack_nr ))
 }
 
@@ -227,29 +250,23 @@ Socket.prototype._send = function(header, data) { //called by _send functions
 
 Socket.prototype._handleDupAck = function (header) {
 	
-	if(this.numPacks == 0) return
-	//if(header.type == ST_DATA) return
-	
+	if(this.numPacks == 0) return	
 	if(header.ack_nr == this.seq_nr - this.numPacks - 1) { //oldests acked packet
-		//console.log("dupack!!")
 		this.dupAck++;
-	} else {
+	} else 
 		this.dupAck = 0;
-	}
 	if(this.dupAck == 3) {
-		
+		console.log("dupack")
 		this.dupAck = 0;
-		this.max_window = this.max_window > 1 ? parseInt(this.max_window / 2) : 1
-	
+		this.max_window = this.max_window > this.packet_size ? parseInt(this.max_window / 2) : this.PACKET_SIZE
 		this.seq_nr = this.seq_nr - this.numPacks
 		this.cur_window = 0
 		this.numPacks = 0
-
 		this._resendData()	
 	}
 }
 
-Socket.prototype._calcTimeout = function(header) {
+Socket.prototype._calcNewTimeout = function(header) {
 	if(this.dupAck != 0) return 
 	let packet_rtt = Math.abs(this.timeStamp()) - Math.abs(header.timestamp_microseconds);
 	let delta = this.rtt - packet_rtt
@@ -262,32 +279,25 @@ Socket.prototype._changeWindowSizes = function(header) {
 	//mutates max send and recieve window sizes
 	this.wnd_size = header.wnd_size;
 	
-	this._calcTimeout(header)
-
-	//use base delay
 	let time = this.timeStamp()
-	
 	this.win_reply_micro2.insert(this.reply_micro, time/1e3)
-	
-	while(!this.win_reply_micro2.isEmpty() && this.win_reply_micro2.peekMinTime().elem < (time/1e3-2*60*1e3) ) {		
+	while(!this.win_reply_micro2.isEmpty() && this.win_reply_micro2.peekMinTime().elem < (time/1e3-2*60*1e3) ) 	
 		this.win_reply_micro2.popMinTime()
-	}
 	
 	if(this.win_reply_micro2.isEmpty())return
-	var min =  this.win_reply_micro2.peekMinTime().time 	
-	let base_delay = min
+	
+	let base_delay = this.win_reply_micro2.peekMinTime().time 	
 	let off_target =  CCONTROL_TARGET - base_delay ;
 	let delay_factor = off_target / CCONTROL_TARGET;
 	let window_factor = this.cur_window / this.max_window;
 	let scaled_gain = MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor;
 	
 	this.max_window += scaled_gain;
-	if(!(this.max_window > 0)) this.max_window = 1
+	if(this.max_window < this.packet_size || !this.max_window) this.max_window = this.packet_size
 }
 
 Socket.prototype._recv = function(msg) { //called by listener, handle ack in all cases
 	header = getHeaderBuf(msg)
-	//console.log('recieved', header)
 	clearTimeout(this.timer)
 	this.timeOutMult = 1;
 	this.reply_micro = Math.abs(this.timeStamp()) - Math.abs(header.timestamp_microseconds)
@@ -308,45 +318,64 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 		} //else if(header.type == ST_DATA)
 	} else if (header.type == ST_FIN) {
 		console.log('ST_FIN')
-		if(!this.connected)
-			this._close()
+		this.disconnecting = true
+		//if(!this.connected)
+		//	this._close()
 		this.eof_pkt = header.seq_nr;
 	} else if (header.type == ST_RESET) {
 		console.log("ST_RESET")
 		this._close()
 		return;
 	}
+	
 	//console.log("handle data or state")
 	this._handleDupAck(header);
 	
 	this._changeWindowSizes(header); //must come before cur_window is decremented
+	this._calcNewTimeout(header)
 	
-	for(var i = this.seq_nr - this.numPacks ; i <= header.ack_nr; i++) {
-		this.timeOutQueue.removeByElem(i)
-		let ackedData = this.sendBuffer.shift()
-		this.sendBufferInit++;
-		this.numPacks--;
-		this.cur_window -= ackedData.length
-		if(i > this.seq_nr) 
-			this.seq_nr++;
+	
+	//if(this.sendBuffer2.startSeq)
+	if(header.ack_nr >= this.sendBuffer2.startSeq) {
+		//this.recvAcks.push(header.ack_nr)
+		//console.log("ACK", header.ack_nr)
+		let packs = this.sendBuffer2.removeSeqs(header.ack_nr)
+		//console.log("packs", packs.length)
+		if(this.seq_nr - 1 - header.ack_nr >= 0) {
+			//console.log("cur_window", this.cur_window)
+			this.numPacks = this.seq_nr - 1 - header.ack_nr;
+			packs.forEach((data)=> {
+				this.cur_window -= data.length
+				//if(data.callback) this.emit('callback')
+				//if(data.callback) {
+				//	data.callback();
+				//	console.log("CALLBACK")
+				//}
+			})
+			//this.cur_window
+		} else {
+			this.numPacks = 0
+			this.cur_window = 0
+			this.seq_nr = header.ack_nr + 1
+		}
+	//this.seq_nr = header.ack_nr + 1;
 	}
 	//either state or data type. in either case handle ack
 	if(!this.eof_pkt) 
 		this._sendData()
 	
 	if(this.numPacks > 0){
-	let elap = (this.timeStamp() - this.timeOutQueue.peekMinTime().time)/1e3
-
-	this.timer = setTimeout(()=> {
-		console.log("TIMEOUT")
-		this.seq_nr = this.seq_nr - this.numPacks;
-		this.numPacks = 0;
-		this.timeOutQueue.empty()
-		this.packet_size = 1500
-		this.max_window = 1
-		this.timeOutMult = 2;
-		this._resendData()
-	}, this.timeOutMult * (this.default_timeout - elap )) //
+		let elap = (this.timeStamp() - this.timeOutQueue.peekMinTime().time)/1e3
+		this.timer = setTimeout(()=> {
+			console.log("TIMEOUT")
+			this.seq_nr = this.seq_nr - this.numPacks;
+			this.numPacks = 0;
+			this.timeOutQueue.empty()
+			this.packet_size = 150
+			this.max_window = this.packet_size
+			this.timeOutMult = 2;
+			this._resendData()
+		}, this.timeOutMult * (this.default_timeout - elap )) //
 	}
 	
 	if(header.type == ST_STATE) return; //nothing more to do
@@ -356,45 +385,23 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 }
  
  Socket.prototype._recvData = function(header, data) {
-	
+	//console.log("_recvData")
 	if(header.seq_nr > this.ack_nr + this.ownWnd_size)
 		return
-	else if (this.ack_nr && (header.seq_nr <= this.ack_nr)) { //already acked
-		this._sendState(header.seq_nr)
-		return;
-	}
-	
+	else if (this.ack_nr && (header.seq_nr <= this.ack_nr)) 
+		return this._sendState(header.seq_nr)
+		
 	this.recvBuffer2.put(header.seq_nr, data)
-	/*
-	var i = 0 //insert in recieve window buffer
-	for(; i < this.recvBuffer.length; i++) { //reverse ##
-		if(header.seq_nr == this.recvBuffer[i].seq_nr) //duplicate data
-			break;
-		else if(header.seq_nr < this.recvBuffer[i].seq_nr) {
-			this.recvBuffer.splice(i,0,{'seq_nr' : header.seq_nr , 'data' : data})
-			//this.recvBuffer[] = data
-			break;
-		} 
-	}
+	//console.log("header.seq_nr", header.seq_nr)
+	this.recvBuffer2.removeSeqs().forEach((data)=> { 
+		
+		this.push(data);
+		//this.stuff.push(data)
+		this.ack_nr++
+		
+	})
 	
-	if(i == this.recvBuffer.length)
-		this.recvBuffer.push({'seq_nr' : header.seq_nr , 'data' : data})
-	*/
-	this.recvBuffer2.removeSeqs().forEach((packs)=> {this.push(packs), this.ack_nr++})
-	
-	//packs.forEach((packs)=>this.push(packs) )
-	/*
-	for(var i = 0; i < this.recvBuffer.length; i++) { //remove contiguous packs 
-		let next_ack = this.ack_nr + 1
-		if(next_ack == this.recvBuffer[i].seq_nr) {
-			//console.log("have", next_ack)
-			this.push(this.recvBuffer.shift().data)
-			this.ack_nr = next_ack
-		} else 
-			break;
-	}*/
-	
-	if(this.eof_pkt & (this.ack_nr == this.eof_pkt)) {
+	if(this.disconnecting && this.eof_pkt & (this.ack_nr == this.eof_pkt)) {
 		if(this.connected) {
 			this._sendFin()
 			this.connected = false;
@@ -402,7 +409,7 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 		this._close() //final shutdown
 		return
 	}
-	//console.log('send ack')
+	
 	this._sendState();
  }
  
@@ -431,17 +438,38 @@ Socket.prototype._writeable = function() {
 
 Socket.prototype._write = function(data, encoding, callback) { //node does buffering
 	if(!this._writeable()) {
-		//console.log('sending', data.toString())
 		this.once('connected', ()=>{this._write( data,encoding, callback)})
-		return
+		return 
 	}
-
+	if(!this.sendBuffer2.isEmpty()) {
+		this.once('empty', ()=>{this._write( data,encoding, callback)})
+		return 
+	}
+	//if(this.sendBuffer2.buffer.length)
+	//this.once('callback', callback)
+	//deferred = q.defer()
+	//this.stuff.push(data.length)
+	let nSeq_nr = this.sendBuffer2.maxSeq + 1
 	while(this._writeable() && data.length > 0)  {
-		this.sendBuffer.push(data.slice(0,this.packet_size))
+		
+		let nextData = data.slice(0,this.packet_size)
 		data = data.slice(this.packet_size)
+		
+		//if(data.length <= this.packet_size)
+		//	nextData.callback = deferred
+		//this.stuff.push([nSeq_nr,nextData])
+		
+		//this.sendBuffer.push(nextData)
+		this.sendBuffer2.put(nSeq_nr, nextData)
+		nSeq_nr++;
 	}
+	
+	
 	this._sendData()	
-	return callback()	
+	return callback()
+	//deferred.
+	//this.callbacks.push(callback)
+	//return callback()	
 }
 
 function getHeaderBuf(buf) {
