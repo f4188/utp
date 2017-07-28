@@ -203,7 +203,7 @@ Socket.prototype._recvSyn = function(header) {
 	this.connecting = true;
 	
 	this.sendWindow = new WindowBuffer(this.seq_nr, this.max_window, header.wnd_size, this.packet_size)
-	this._sendState() //synack
+	this._sendState(this.seq_nr, this.ack_nr) //synack
 	this.seq_nr++;
 }
 
@@ -235,8 +235,8 @@ Socket.prototype._sendData = function() {
 	if(this.dataBuffer.length < this.packet_size ) this.emit('databuffer:length<packet_size')
 }
 
-Socket.prototype._sendState = function(ack_nr) { //called by _recvSyn, _keepAlice, calls _send
-	this._send(this.makeHeader(ST_STATE, null, ack_nr ))
+Socket.prototype._sendState = function(seq_nr, ack_nr) { //called by _recvSyn, _keepAlice, calls _send
+	this._send(this.makeHeader(ST_STATE, seq_nr, ack_nr ))
 }
 
 Socket.prototype._send = function(header, data) { //called by _send functions
@@ -358,7 +358,7 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
  Socket.prototype._recvData = function(header, data) {
 	
 	if(header.seq_nr <= this.recvWindow.ackNum())
-		return this._sendState(header.seq_nr)
+		return this._sendState(this.sendWindow.seqNum(), this.recvWindow.ackNum())
 
 	this.recvWindow.insert(header.seq_nr, data)
 	let packs = this.recvWindow.removeSequential(header.seq_nr)
@@ -375,7 +375,7 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 		return
 	}
 
-	this._sendState(this.recvWindow.ackNum());
+	this._sendState(this.sendWindow.seqNum(), this.recvWindow.ackNum());
  }
  
 Socket.prototype._close = function() { //fin exchanged
