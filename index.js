@@ -264,8 +264,9 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 	header = getHeaderBuf(msg)
 	clearTimeout(this.timer)
 	this.timeOutMult = 1;
-	this.reply_micro = Math.abs(this.timeStamp()) - Math.abs(header.timestamp_microseconds)
+	this.reply_micro = Math.abs(this.timeStamp()) - Math.abs(header.timestamp_microseconds) % Math.pow(2,31)
 	
+
 	if(header.type == ST_SYN) { //handle spurious syn and first syn
 		if(!this.connected)
 			this._recvSyn(header)
@@ -387,6 +388,7 @@ function getHeaderBuf(buf) {
 }
 
 function getBufHeader(header) {
+	//console.log(header)
 	let buf = Buffer.alloc(20)
 	buf.writeUInt8(header.type << 4 | header.ver, 0)
 	buf.writeUInt8(header.extension, 1)
@@ -405,14 +407,14 @@ Socket.prototype.makeHeader = function(type, seq_nr, ack_nr) { //no side effects
 		'ver' : VERSION,
 		'connection_id' : type == ST_SYN ? this.recvConnectID : this.sendConnectID,
 		'timestamp_microseconds' : this.timeStamp(),  
-		'timestamp_difference_microseconds' : this.reply_micro,
+		'timestamp_difference_microseconds' : this.reply_micro % Math.pow(2,31),
 		'wnd_size' : DEFAULT_WINDOW_SIZE,
 		'seq_nr' : seq_nr ? seq_nr : this.seq_nr,
 		'ack_nr' : ack_nr ? ack_nr : this.ack_nr,
 	}
 }
 
-var timeStampF = function () {
+var timeStampF = function () { //microsecond timestamp
 	let now = process.hrtime()
 	return (now[0] * 1e6 + Math.floor(now[1]/1e3)) % Math.pow(2,32)
 }
