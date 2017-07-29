@@ -67,10 +67,11 @@ Server.prototype.listen = function(port, connectListener) {
 		process.stdout.write("Downloading")
 		this.conSockets[id].on('data', (data) => {
 			var bs = speed(data.length); 
+			//this.conSocketspid
 			this.conSockets[id].total += data.length; 
 			//process.stdout.clearLine();  
 			//process.stdout.cursorTo(0); 
-			//process.stdout.write("TOTAL:", this.conSockets[id].total, "|" ,"BYTES PER SECOND:",bs );
+			console.log("TOTAL:", this.conSockets[id].total, "|" ,"BYTES PER SECOND:",bs );
 			//console.log("seq num",  this.conSockets[id].seq_nr)
 			 
 			})
@@ -93,12 +94,11 @@ function Socket(udpSock, port, host) {
 	this.port = port;
 	this.host = host;
 	
-	this.total
+	this.total = 0
 
 	this.dataBuffer = Buffer.alloc(0)
 	this.sendWindow;
 	this.recvWindow;
-	this.unsendPackets = []
 
 	this.finished = false
 	this.timer;
@@ -110,17 +110,7 @@ function Socket(udpSock, port, host) {
 	this.disconnecting = true;
 	
 	this.dupAck = 0;
-	
-	//in window 
 	this.packet_size = PACKET_SIZE
-	this.numPacks = 0; //number of packets sent
-	this.cur_window = 0; //bytes sent, not acked
-	this.max_window = DEFAULT_WINDOW_SIZE; //max send window 
-	this.wnd_size = DEFAULT_WINDOW_SIZE; //max recieve window
-	this.ownWnd_size = DEFAULT_WINDOW_SIZE;
-	this.seq_nr;
-	this.ack_nr;
-
 	this.unsend = []
 
 	this.eof_pkt = null;
@@ -139,7 +129,6 @@ function Socket(udpSock, port, host) {
 	this.win_reply_micro = new TQueue()
 
 	this.on('finish', ()=>{this.finished = true})
-
 }
 
 util.inherits(Socket, Duplex)
@@ -148,8 +137,7 @@ Socket.prototype.remoteAddress = function () { return {'port' : this.port, 'host
 
 Socket.prototype.connect = function (port, host) {
 	this.port = port;
-	this.host = host;
-	
+	this.host = host;	
 	/*
 	this.keepAlive = setInterval(()=> {
 		console.log('keep alive')
@@ -157,23 +145,19 @@ Socket.prototype.connect = function (port, host) {
 	}, KEEP_ALIVE_INTERVAL);
 	*/
 	this.udpSock.on('message', (msg, rinfo) => {
-		
 		//console.log("Socket: recieved packet")
 		//console.log("Header")
 		//console.log(getHeaderBuf(msg))
-		if(getHeaderBuf(msg).connection_id == this.recvConnectID) {
+		if(getHeaderBuf(msg).connection_id == this.recvConnectID) 
 			this._recv(msg);
-		}
-	})
-	
+	})	
 	this.connecting = true;
 	this._sendSyn()
 	
 }
 
 Socket.prototype._sendSyn = function() { //called by connect
-	this.seq_nr = crypto.randomBytes(2).readUInt16BE();
-
+	let seq_nr = crypto.randomBytes(2).readUInt16BE();
 	this.recvConnectID = crypto.randomBytes(2).readUInt16BE();
 	this.sendConnectID = this.recvConnectID + 1;
 	/*
@@ -182,29 +166,21 @@ Socket.prototype._sendSyn = function() { //called by connect
 		this._send(header)
 	}, this.timeOutMult * this.default_timeout) //resend syn
 	*/
-	this.sendWindow = new WindowBuffer(this.seq_nr, this.max_window, null, this.packet_size)
-
-	let header = this.makeHeader(ST_SYN, this.seq_nr, null)
-
-	this.timeOutQueue.insert(header.timestamp_microseconds, this.seq_nr)
-
+	this.sendWindow = new WindowBuffer(seq_nr, DEFAULT_WINDOW_SIZE, -1, this.packet_size)
+	let header = this.makeHeader(ST_SYN, seq_nr, null)
+	this.timeOutQueue.insert(header.timestamp_microseconds, seq_nr)
 	this._send(header);
-
-	this.seq_nr++;
 } 
 
 Socket.prototype._recvSyn = function(header) {
 	this.sendConnectID = header.connection_id;
 	this.recvConnectID = header.connection_id + 1;
-	this.ack_nr = header.seq_nr;
-	this.recvWindow = new WindowBuffer(header.seq_nr, this.ownWnd_size, null, this.packet_size)
-	this.seq_nr = crypto.randomBytes(2).readUInt16BE()
+	this.recvWindow = new WindowBuffer(header.seq_nr, -1, DEFAULT_WINDOW_SIZE, this.packet_size)
+	let seq_nr = crypto.randomBytes(2).readUInt16BE()
 	this.wnd_size = header.wnd_size;
 	this.connecting = true;
-	
-	this.sendWindow = new WindowBuffer(this.seq_nr, this.max_window, header.wnd_size, this.packet_size)
-	this._sendState(this.seq_nr, this.ack_nr) //synack
-	this.seq_nr++;
+	this.sendWindow = new WindowBuffer(seq_nr, DEFAULT_WINDOW_SIZE, header.wnd_size, this.packet_size)
+	this._sendState(seq_nr, this.recvWindow.ackNum()) //synack
 }
 
 Socket.prototype._sendFin = function() {
@@ -213,11 +189,9 @@ Socket.prototype._sendFin = function() {
 }
 
 Socket.prototype._sendData = function() {
-	
 	while(!this.sendWindow.isFull() && (this.dataBuffer.length > this.packet_size || this.finished)) {
 		let nextData;
 		let seq;
-
 		if(this.unsend.length == 0) {
 			nextData = this.dataBuffer.slice(0,this.packet_size)
 			if(!nextData || nextData.length == 0) break //data is packet_size multiple
@@ -228,25 +202,23 @@ Socket.prototype._sendData = function() {
 
 		let header = this.makeHeader(ST_DATA, seq)
 		this.timeOutQueue.insert(header.timestamp_microseconds, seq)
-		this._send(header, nextData)
-		
+		this._send(header, nextData)		
 	}
-	
 	if(this.dataBuffer.length < this.packet_size ) this.emit('databuffer:length<packet_size')
 }
 
-Socket.prototype._sendState = function(seq_nr, ack_nr) { //called by _recvSyn, _keepAlice, calls _send
+Socket.prototype._sendState = function(seq_nr, ack_nr) { 
 	this._send(this.makeHeader(ST_STATE, seq_nr, ack_nr ))
 }
 
-Socket.prototype._send = function(header, data) { //called by _send functions
+Socket.prototype._send = function(header, data) { 
 	let bufHeader = getBufHeader(header)
 	let packet = data != undefined ? Buffer.concat([bufHeader, data]): bufHeader
 	this.udpSock.send(packet, this.port, this.host)
 } 
 
 Socket.prototype._handleDupAck = function (ackNum) {
-	let lastAck = this.sendWindow.ackNum()
+	let lastAck = this.recvWindow.ackNum()
 	if(ackNum != lastAck)
 		this.dupAck = 0
 	else 
@@ -270,7 +242,6 @@ Socket.prototype._calcNewTimeout = function(header) {
 }
 
 Socket.prototype._changeWindowSizes = function(header) {
-	this.wnd_size = header.wnd_size;
 	this.sendWindow.maxRecvWindowBytes = header.wnd_size
 
 	let time = this.timeStamp()
@@ -284,9 +255,7 @@ Socket.prototype._changeWindowSizes = function(header) {
 	let window_factor = this.cur_window / this.max_window;
 	let scaled_gain = MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor;
 	
-	this.max_window += scaled_gain;
 	this.sendWindow.maxWindowBytes += scaled_gain
-	if(this.max_window < this.packet_size || !this.max_window) this.max_window = this.packet_size
 	if(this.sendWindow.maxWindowBytes < this.packet_size) this.sendWindow.maxWindowBytes = this.packet_size
 
 }
@@ -307,10 +276,8 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 		if(header.type == ST_STATE) { //sender of syn only
 			console.log('Finish connection est')
 			this.timeOutQueue.removeByElem(this.seq_nr)
-			this.ack_nr = header.seq_nr	
 			this.sendWindow.maxRecvWindowBytes = header.wnd_size
-			this.recvWindow = new WindowBuffer(header.seq_nr, this.max_window, null, this.packet_size)
-			
+			this.recvWindow = new WindowBuffer(header.seq_nr, -1, DEFAULT_WINDOW_SIZE, this.packet_size)	
 			this.emit('connected')
 		} 
 	} else if (header.type == ST_FIN) {
@@ -336,9 +303,7 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 		let elap = (this.timeStamp() - this.timeOutQueue.peekMinTime().time)/1e3
 		
 		this.timer = setTimeout(()=> {
-			console.log("TIMEOUT")
-			
-			
+			console.log("TIMEOUT")		
 			this.timeOutQueue.empty()
 			this.packet_size = 150
 			this.sendWindow.packetSize = this.packet_size
@@ -349,8 +314,7 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 		}, this.timeOutMult * (this.default_timeout - elap )) //
 	}*/
 	
-	if(header.type == ST_STATE) return; //nothing more to do
-	
+	if(header.type == ST_STATE) return; //nothing more to do	
 	if(header.type == ST_DATA)
 		this._recvData(header, msg.slice(20))
 }
@@ -361,8 +325,7 @@ Socket.prototype._recv = function(msg) { //called by listener, handle ack in all
 		return this._sendState(this.sendWindow.seqNum(), this.recvWindow.ackNum())
 
 	this.recvWindow.insert(header.seq_nr, data)
-	let packs = this.recvWindow.removeSequential(header.seq_nr)
-	
+	let packs = this.recvWindow.removeSequential(header.seq_nr)	
 	while(packs.length > 0)
 		this.push(packs.shift())
 	
@@ -443,7 +406,7 @@ Socket.prototype.makeHeader = function(type, seq_nr, ack_nr) { //no side effects
 		'connection_id' : type == ST_SYN ? this.recvConnectID : this.sendConnectID,
 		'timestamp_microseconds' : this.timeStamp(),  
 		'timestamp_difference_microseconds' : this.reply_micro,
-		'wnd_size' : this.ownWnd_size,
+		'wnd_size' : DEFAULT_WINDOW_SIZE,
 		'seq_nr' : seq_nr ? seq_nr : this.seq_nr,
 		'ack_nr' : ack_nr ? ack_nr : this.ack_nr,
 	}

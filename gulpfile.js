@@ -18,6 +18,7 @@ gulp.task('test', (cb) => {
 				//sock.on('closed', cb)
 				cb()
 		})*/
+		//sock.on('finish', cb)
 		
 		getPort().then(port => {
 			console.log('Server: listening on port', port)
@@ -26,22 +27,11 @@ gulp.task('test', (cb) => {
 			server.listen(port)
 					
 			sock.connect(port)
-			
-			sock.on('connected', fs.createReadStream('./c_primer_5th_edition.pdf').pipe(sock))
+			f = fs.createReadStream('../../number.txt')
+			sock.on('connected', f.pipe(sock))
 			
 		});
+		setTimeout(cb, 2000)
+		//return f
 		
-		
-		//return deferred.promise;
-		
-		setTimeout(()=>{
-			//console.log(sock.dataBuffer.length)
-			//console.log(sock.dataBuffer)
-			//console.log(sock.sendBuffer)
-			//console.log(sock)
-			//console.log('THIS TIME ENDING5')
-			//sock.end()
-			//console.log(server.cheat[0].recvBuffer)
-			cb()
-		}, 50000)
 });
