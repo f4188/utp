@@ -5,6 +5,7 @@ const createSocket = require('./index.js').createSocket
 const getPort = require('get-port')
 const fs = require('fs')
 var Q = require('q')
+var exec = require('gulp-exec')
 
 gulp.task('test', (cb) => {
 		console.log('Testing uTP');
@@ -18,6 +19,7 @@ gulp.task('test', (cb) => {
 				//sock.on('closed', cb)
 				cb()
 		})*/
+		//sock.on('finish', cb)
 		
 		getPort().then(port => {
 			console.log('Server: listening on port', port)
@@ -26,22 +28,37 @@ gulp.task('test', (cb) => {
 			server.listen(port)
 					
 			sock.connect(port)
-			
-			sock.on('connected', fs.createReadStream('./c_primer_5th_edition.pdf').pipe(sock))
+			f = fs.createReadStream('../../number.txt')
+			sock.on('connected', f.pipe(sock))
 			
 		});
+		setTimeout(cb, 2000)
+		//return f
 		
-		
-		//return deferred.promise;
-		
-		setTimeout(()=>{
-			//console.log(sock.dataBuffer.length)
-			//console.log(sock.dataBuffer)
-			//console.log(sock.sendBuffer)
-			//console.log(sock)
-			//console.log('THIS TIME ENDING5')
-			//sock.end()
-			//console.log(server.cheat[0].recvBuffer)
-			cb()
-		}, 50000)
 });
+
+
+//git stash create > t.txt
+//set  /p VAR=<t.txt
+//git archive %VAR% -o latest2.tar
+//sudo scp -i f4188.pem "/mnt/c/Users/Fawaz A/Documents/Workspace/fztorrent/uTP/latest.tar" ec2-user@54.158.235.118:/home/ec2-user/
+//tar -xf latest.tar -C latest
+
+gulp.task('transfer', function(cb) {
+	exec('git stash create', function(err, stdout, stderr) {
+		console.log(stdout)
+		exec('git archive ${stdout} -o latest2.tar', function(err, stdout, stderr) {
+			console.log('worked')
+			cb(err)
+		})
+		
+	})
+
+
+
+
+})
+
+gulp.task('watch', function() {
+	gulp.watch(['lib/*.js', '*.js'], ['transfer'])
+})
